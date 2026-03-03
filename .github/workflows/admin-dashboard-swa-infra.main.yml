@@ -1,0 +1,130 @@
+
+name: Deploy Admin Panel SWA (Production)
+
+on:
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: admin-panel-swa-production
+  cancel-in-progress: false
+
+env:
+  DEPLOY_ENV: production
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+  NODE_VERSION: "22"
+  SWA_BUCKET_SSM_PARAMETER_POINTER: ${{ vars.PRODUCTION_SWA_BUCKET_SSM_PARAMETER }}
+  CF_DISTRIBUTION_ID_SSM_PARAMETER_POINTER: ${{ vars.PRODUCTION_CF_DISTRIBUTION_ID_SSM_PARAMETER }}
+  REACT_APP_BASE_URL_SSM_PARAMETER_POINTER: ${{ vars.PRODUCTION_REACT_APP_BASE_URL_SSM_PARAMETER }}
+  REACT_APP_MAP_API_KEY_SECRET_NAME_POINTER: ${{ vars.PRODUCTION_REACT_APP_MAP_API_KEY_SECRET_NAME }}
+  REACT_APP_VAPID_KEY_SECRET_NAME_POINTER: ${{ vars.PRODUCTION_REACT_APP_VAPID_KEY_SECRET_NAME }}
+  REACT_APP_API_KEY_SECRET_NAME_POINTER: ${{ vars.PRODUCTION_REACT_APP_API_KEY_SECRET_NAME }}
+  REACT_APP_RECAPTCHA_SITE_KEY_SECRET_NAME_POINTER: ${{ vars.PRODUCTION_REACT_APP_RECAPTCHA_SITE_KEY_SECRET_NAME }}
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          yarn --version
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+          aws --version
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          role-session-name: github-actions-admin-panel-swa-production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment target and build-time values
+        run: |
+          SWA_BUCKET_NAME=$(aws ssm get-parameter \
+            --name "${{ env.SWA_BUCKET_SSM_PARAMETER_POINTER }}" \
+            --query "Parameter.Value" \
+            --output text)
+          CLOUDFRONT_DISTRIBUTION_ID=$(aws ssm get-parameter \
+            --name "${{ env.CF_DISTRIBUTION_ID_SSM_PARAMETER_POINTER }}" \
+            --query "Parameter.Value" \
+            --output text)
+          REACT_APP_BASE_URL=$(aws ssm get-parameter \
+            --name "${{ env.REACT_APP_BASE_URL_SSM_PARAMETER_POINTER }}" \
+            --query "Parameter.Value" \
+            --output text)
+          REACT_APP_MAP_API_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ env.REACT_APP_MAP_API_KEY_SECRET_NAME_POINTER }}" \
+            --query "SecretString" \
+            --output text)
+          REACT_APP_VAPID_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ env.REACT_APP_VAPID_KEY_SECRET_NAME_POINTER }}" \
+            --query "SecretString" \
+            --output text)
+          REACT_APP_API_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ env.REACT_APP_API_KEY_SECRET_NAME_POINTER }}" \
+            --query "SecretString" \
+            --output text)
+          REACT_APP_RECAPTCHA_SITE_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ env.REACT_APP_RECAPTCHA_SITE_KEY_SECRET_NAME_POINTER }}" \
+            --query "SecretString" \
+            --output text)
+
+          echo "::add-mask::${REACT_APP_MAP_API_KEY}"
+          echo "::add-mask::${REACT_APP_VAPID_KEY}"
+          echo "::add-mask::${REACT_APP_API_KEY}"
+          echo "::add-mask::${REACT_APP_RECAPTCHA_SITE_KEY}"
+
+          echo "SWA_BUCKET_NAME=${SWA_BUCKET_NAME}" >> "${GITHUB_ENV}"
+          echo "CLOUDFRONT_DISTRIBUTION_ID=${CLOUDFRONT_DISTRIBUTION_ID}" >> "${GITHUB_ENV}"
+          echo "REACT_APP_BASE_URL=${REACT_APP_BASE_URL}" >> "${GITHUB_ENV}"
+          echo "REACT_APP_MAP_API_KEY=${REACT_APP_MAP_API_KEY}" >> "${GITHUB_ENV}"
+          echo "REACT_APP_VAPID_KEY=${REACT_APP_VAPID_KEY}" >> "${GITHUB_ENV}"
+          echo "REACT_APP_API_KEY=${REACT_APP_API_KEY}" >> "${GITHUB_ENV}"
+          echo "REACT_APP_RECAPTCHA_SITE_KEY=${REACT_APP_RECAPTCHA_SITE_KEY}" >> "${GITHUB_ENV}"
+
+      - name: Install dependencies
+        run: |
+          if [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            yarn install
+          fi
+
+      - name: Build app
+        run: yarn build
+
+      - name: Deploy build artifacts
+        run: aws s3 sync "build/" "s3://${SWA_BUCKET_NAME}" --delete
+
+      - name: Invalidate CloudFront cache
+        run: aws cloudfront create-invalidation --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" --paths /index.html
