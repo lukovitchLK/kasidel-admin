@@ -16,7 +16,7 @@ concurrency:
 
 env:
   DEPLOY_ENV: staging
-  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'af-south-1' }}
   ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
   NODE_VERSION: "22"
   SWA_BUCKET_SSM_PARAMETER_POINTER: ${{ vars.STAGING_SWA_BUCKET_SSM_PARAMETER }}
@@ -58,6 +58,24 @@ jobs:
           unzip -q awscliv2.zip
           sudo ./aws/install --update
           aws --version
+
+      - name: Validate required workflow variables
+        run: |
+          for v in \
+            ROLE_ARN \
+            SWA_BUCKET_SSM_PARAMETER_POINTER \
+            CF_DISTRIBUTION_ID_SSM_PARAMETER_POINTER \
+            REACT_APP_BASE_URL_SSM_PARAMETER_POINTER \
+            REACT_APP_MAP_API_KEY_SECRET_NAME_POINTER \
+            REACT_APP_VAPID_KEY_SECRET_NAME_POINTER \
+            REACT_APP_API_KEY_SECRET_NAME_POINTER \
+            REACT_APP_RECAPTCHA_SITE_KEY_SECRET_NAME_POINTER
+          do
+            if [ -z "${!v}" ]; then
+              echo "::error::Missing required workflow variable: ${v}"
+              exit 1
+            fi
+          done
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -122,7 +140,7 @@ jobs:
           fi
 
       - name: Build app
-        run: yarn build
+        run: CI=false yarn build
 
       - name: Deploy build artifacts
         run: aws s3 sync "build/" "s3://${SWA_BUCKET_NAME}" --delete
